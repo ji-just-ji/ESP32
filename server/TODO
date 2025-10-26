@@ -1,0 +1,20 @@
+1. Standardize 
+  a. MQTT Broker
+  b. MQTT Port
+  c. TOPICS for all the Channels
+
+2. For ANC need to standardize:
+  a. Sample rate
+  b. Chunk size (num of audio samples processed at a time)
+  c. Filter Length
+  d. Bit Depth (dtype i.e. int16)
+  e. Step size (MU, LMS adaptation rate, how fast filter weights change)
+  g. Number of audio channels per sample (Mono Audio 1 channel)
+  h. endianness/byte order
+  i. Normalization / Scaling
+
+3. Figure out Latency samples. (Num of samlples ref audio is delayed to compensate network server latency)
+  a. approx: round(latency * sample rate)
+
+
+
