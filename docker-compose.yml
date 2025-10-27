@@ -28,7 +28,7 @@ services:
       - "1883:1883"
       - "9001:9001"
     volumes:
-      - ./mosquitto/config:/mosquitto/config
+      - ./mqtt_backbone/mosquitto/config:/mosquitto/config
       - mosquitto_data:/mosquitto/data
       - mosquitto_log:/mosquitto/log
     networks:
@@ -51,8 +51,8 @@ services:
       - GF_INSTALL_PLUGINS=grafana-clickhouse-datasource
       - GF_PATHS_PROVISIONING=/etc/grafana/provisioning
     volumes:
-      - ../grafana/provisioning:/etc/grafana/provisioning
-      - ../grafana/dashboards:/var/lib/grafana/dashboards
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
       - grafana_data:/var/lib/grafana
     networks:
       - iot-network
@@ -66,7 +66,7 @@ services:
 
   ml_service:
     build:
-      context: ../ml_service
+      context: ./ml_service
       dockerfile: Dockerfile
     container_name: iot-ml-service
     environment:
