@@ -1,9 +1,0 @@
-{
-  "coefficients": {
-    "temperature": 0.3,
-    "humidity": -0.2,
-    "sound": -0.15
-  },
-  "intercept": 0.0,
-  "threshold": 5.0
-}
