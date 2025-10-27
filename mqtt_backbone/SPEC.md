@@ -1,4 +1,4 @@
-# IoT Backend System Specification v1.5
+# IoT Backend System Specification
 
 ## Project Overview
 
