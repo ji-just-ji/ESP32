@@ -1,16 +1,18 @@
 package aggregator
 
 import (
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"log"
 	"math"
 )
 
 // AudioConfig holds configuration for audio processing
 type AudioConfig struct {
-	BitsPerSample int     // Typically 16 for 16-bit PCM
+	BitsPerSample  int     // Typically 16 for 16-bit PCM
 	ReferenceLevel float64 // Reference level for dB calculation (default: 32768.0 for 16-bit)
-	MinimumRMS    float64 // Minimum RMS to avoid log(0), represents silence threshold
+	MinimumRMS     float64 // Minimum RMS to avoid log(0), represents silence threshold
 }
 
 // DefaultAudioConfig returns default audio processing configuration
@@ -110,12 +112,12 @@ func calculateDecibels(rms float64, reference float64) float64 {
 
 // AnalyzeAudioQuality provides basic audio quality metrics
 type AudioQualityMetrics struct {
-	RMS            float64 // RMS value
-	VolumeDB       float64 // Volume in decibels
-	PeakAmplitude  int16   // Peak sample value
-	IsClipping     bool    // True if clipping detected
-	IsSilent       bool    // True if audio is essentially silent
-	SampleCount    int     // Number of samples
+	RMS           float64 // RMS value
+	VolumeDB      float64 // Volume in decibels
+	PeakAmplitude int16   // Peak sample value
+	IsClipping    bool    // True if clipping detected
+	IsSilent      bool    // True if audio is essentially silent
+	SampleCount   int     // Number of samples
 }
 
 // AnalyzeAudio provides detailed audio analysis
@@ -172,4 +174,10 @@ func AnalyzeAudio(audioData []byte, sampleRate int) AudioQualityMetrics {
 	metrics.VolumeDB = calculateDecibels(metrics.RMS, config.ReferenceLevel)
 
 	return metrics
+}
+
+// ComputeAudioHash computes SHA256 hash of audio data for reference
+func ComputeAudioHash(data []byte) string {
+	hash := sha256.Sum256(data)
+	return hex.EncodeToString(hash[:])
 }
