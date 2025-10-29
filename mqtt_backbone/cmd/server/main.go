@@ -16,7 +16,7 @@ import (
 )
 
 func main() {
-	log.Println("Starting IoT Backend Service v1.5 (Channel-Based Architecture)...")
+	log.Println("Starting IoT Backend Service v2.0 (CQRS-Based Inference)...")
 
 	// Load configuration
 	cfg := config.Load()
@@ -103,22 +103,23 @@ func main() {
 	// Start publisher goroutine
 	go publisher.Start(ctx)
 
-	// === Initialize Inference Service ===
-	log.Println("Initializing inference service...")
+	// === Initialize Inference Service (CQRS-based) ===
+	log.Println("Initializing CQRS-based inference service...")
 	inferenceConfig := services.InferenceServiceConfig{
-		TemperatureThreshold: cfg.TemperatureThreshold,
-		HumidityThreshold:    cfg.HumidityThreshold,
-		RateLimitDuration:    5 * time.Second,
-		ChannelSize:          50,
+		PollingIntervalSeconds: cfg.InferencePollingIntervalSeconds,
+		DataWindowSeconds:      cfg.InferenceDataWindowSeconds,
+		HistoricalBaselineDays: cfg.InferenceHistoricalBaselineDays,
+		ZScoreThreshold:        cfg.InferenceZScoreThreshold,
+		ChannelSize:            50,
 	}
 
-	inferenceService := services.NewInferenceService(inferenceConfig)
+	inferenceService := services.NewInferenceService(db, inferenceConfig)
 
 	// Connect inference service output to publisher input
 	// (They share the same channel)
 	inferenceService.InferenceReqChan = inferenceReqChan
 
-	// Start inference service
+	// Start inference service (polling loop)
 	go inferenceService.Start(ctx)
 
 	// === Initialize Sensor Service ===
@@ -140,11 +141,12 @@ func main() {
 	go handleWindowControlLoop(ctx, db, windowControlChan)
 
 	// === Log startup info ===
-	log.Println("=== IoT Backend Service v1.5 is running ===")
-	log.Printf("Architecture: Channel-based with separated layers")
-	log.Printf("Change detection thresholds: Temp=%.2f°C, Humidity=%.2f%%",
-		cfg.TemperatureThreshold, cfg.HumidityThreshold)
-	log.Printf("Inference trigger: Volume always triggers, temp/humidity on threshold")
+	log.Println("=== IoT Backend Service v2.0 is running ===")
+	log.Printf("Architecture: CQRS-based inference with time-based polling")
+	log.Printf("Inference polling: Every %d seconds, data window=%d seconds",
+		cfg.InferencePollingIntervalSeconds, cfg.InferenceDataWindowSeconds)
+	log.Printf("Historical baseline: %d days, Z-score threshold=%.2f",
+		cfg.InferenceHistoricalBaselineDays, cfg.InferenceZScoreThreshold)
 	log.Printf("MQTT Topics:")
 	log.Printf("  - Temperature:    %s", cfg.MQTTTopicTemperature)
 	log.Printf("  - Humidity:       %s", cfg.MQTTTopicHumidity)

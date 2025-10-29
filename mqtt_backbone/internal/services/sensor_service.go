@@ -149,11 +149,6 @@ func (s *SensorService) processTemperature(reading *models.TemperatureReading) {
 
 	// Auto-register device
 	s.registerDevice(reading.DeviceID)
-
-	// Forward to inference service
-	if s.inferenceService != nil {
-		s.inferenceService.UpdateTemperature(reading)
-	}
 }
 
 // processHumidity handles a single humidity reading
@@ -168,11 +163,6 @@ func (s *SensorService) processHumidity(reading *models.HumidityReading) {
 
 	// Auto-register device
 	s.registerDevice(reading.DeviceID)
-
-	// Forward to inference service
-	if s.inferenceService != nil {
-		s.inferenceService.UpdateHumidity(reading)
-	}
 }
 
 // processAudio handles a single audio recording
@@ -187,20 +177,15 @@ func (s *SensorService) processAudio(recording *models.AudioRecording) {
 	audioHash := aggregator.ComputeAudioHash(recording.Data)
 
 	// Save audio metadata to database (not the raw data)
-	if err := s.db.SaveAudio(recording, audioHash); err != nil {
+	if err := s.db.SaveAudio(recording, audioHash, volume); err != nil {
 		log.Printf("Error saving audio metadata: %v", err)
 		return
 	}
 
-	log.Printf("Saved audio metadata: device=%s, hash=%s", recording.DeviceID, audioHash[:8])
+	log.Printf("Saved audio metadata: device=%s, hash=%s, volume=%.2f dB", recording.DeviceID, audioHash[:8], volume)
 
 	// Auto-register device
 	s.registerDevice(recording.DeviceID)
-
-	// Forward volume to inference service
-	if s.inferenceService != nil {
-		s.inferenceService.UpdateVolume(recording.DeviceID, volume, recording.Timestamp)
-	}
 }
 
 // registerDevice auto-registers a device on first message
@@ -218,5 +203,10 @@ func (s *SensorService) registerDevice(deviceID string) {
 	// Best effort - don't fail if registration fails
 	if err := s.db.UpsertDevice(device); err != nil {
 		log.Printf("Error registering device %s: %v", deviceID, err)
+	}
+
+	// Register device with inference service for tracking
+	if s.inferenceService != nil {
+		s.inferenceService.RegisterDevice(deviceID)
 	}
 }

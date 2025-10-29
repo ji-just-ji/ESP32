@@ -35,7 +35,13 @@ type Config struct {
 	// ML Model Configuration
 	ModelPath              string
 
-	// Change Detection Thresholds
+	// CQRS Inference Configuration
+	InferencePollingIntervalSeconds int     // How often to poll ClickHouse (seconds)
+	InferenceDataWindowSeconds      int     // Time window for querying current data (seconds)
+	InferenceHistoricalBaselineDays int     // Days of historical data for std dev calculation
+	InferenceZScoreThreshold        float64 // Z-score threshold for triggering inference
+
+	// Legacy Change Detection Thresholds (deprecated in CQRS model)
 	TemperatureThreshold   float64
 	HumidityThreshold      float64
 	AudioAlwaysTrigger     bool
@@ -72,7 +78,13 @@ func Load() *Config {
 		// ML Model Configuration
 		ModelPath:              getEnv("MODEL_PATH", "./model/regression_model.json"),
 
-		// Change Detection Thresholds
+		// CQRS Inference Configuration
+		InferencePollingIntervalSeconds: getEnvInt("INFERENCE_POLLING_INTERVAL_SECONDS", 60),
+		InferenceDataWindowSeconds:      getEnvInt("INFERENCE_DATA_WINDOW_SECONDS", 120),
+		InferenceHistoricalBaselineDays: getEnvInt("INFERENCE_HISTORICAL_BASELINE_DAYS", 7),
+		InferenceZScoreThreshold:        getEnvFloat("INFERENCE_Z_SCORE_THRESHOLD", 1.5),
+
+		// Legacy Change Detection Thresholds (deprecated in CQRS model)
 		TemperatureThreshold:   getEnvFloat("TEMPERATURE_THRESHOLD", 0.5),
 		HumidityThreshold:      getEnvFloat("HUMIDITY_THRESHOLD", 2.0),
 		AudioAlwaysTrigger:     getEnvBool("AUDIO_ALWAYS_TRIGGER", true),
@@ -99,6 +111,20 @@ func getEnvFloat(key string, defaultValue float64) float64 {
 		return defaultValue
 	}
 	return floatValue
+}
+
+func getEnvInt(key string, defaultValue int) int {
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultValue
+	}
+
+	intValue, err := strconv.Atoi(value)
+	if err != nil {
+		log.Printf("Warning: failed to parse %s as int, using default: %v", key, err)
+		return defaultValue
+	}
+	return intValue
 }
 
 func getEnvBool(key string, defaultValue bool) bool {

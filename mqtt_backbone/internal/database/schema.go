@@ -34,6 +34,7 @@ const (
 			duration Float64,
 			format String,
 			audio_hash String,
+			sound_volume Float64,
 			features String
 		) ENGINE = MergeTree()
 		ORDER BY (device_id, timestamp)
@@ -82,6 +83,20 @@ const (
 		ORDER BY (device_id, timestamp)
 		PARTITION BY toYYYYMM(timestamp)
 	`
+
+	// InferenceHistoryTableSQL tracks when inferences were triggered for each device
+	InferenceHistoryTableSQL = `
+		CREATE TABLE IF NOT EXISTS inference_history (
+			timestamp DateTime64(3),
+			device_id String,
+			trigger_reason String,
+			temp_z_score Float64,
+			humidity_z_score Float64,
+			volume_z_score Float64
+		) ENGINE = MergeTree()
+		ORDER BY (device_id, timestamp)
+		PARTITION BY toYYYYMM(timestamp)
+	`
 )
 
 // AllTables returns all table creation SQL statements
@@ -93,5 +108,6 @@ func AllTables() []string {
 		WindowActionsTableSQL,
 		DeviceRegistryTableSQL,
 		MLPredictionsTableSQL,
+		InferenceHistoryTableSQL,
 	}
 }

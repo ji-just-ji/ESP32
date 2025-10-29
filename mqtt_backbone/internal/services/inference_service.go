@@ -7,247 +7,255 @@ import (
 	"sync"
 	"time"
 
+	"iot-backend/internal/database"
 	"iot-backend/internal/models"
 )
 
-// DeviceInferenceState tracks the inference state for a single device
-type DeviceInferenceState struct {
-	DeviceID                  string
-	LastTemperature           *models.TemperatureReading
-	LastHumidity              *models.HumidityReading
-	LastSoundVolume           *float64
-	LastSoundVolumeTimestamp  time.Time
-	HasCompletedFirstInference bool
-	LastInferenceTime         time.Time
-	mu                        sync.RWMutex
-}
-
-// IsReadyForInference checks if device has all required sensors for inference
-func (state *DeviceInferenceState) IsReadyForInference() bool {
-	state.mu.RLock()
-	defer state.mu.RUnlock()
-
-	return state.LastTemperature != nil &&
-		state.LastHumidity != nil &&
-		state.LastSoundVolume != nil
-}
-
-// InferenceService manages ML inference triggering based on sensor data
+// InferenceService manages ML inference triggering using CQRS pattern
+// Instead of event-driven triggering, it polls ClickHouse periodically
+// and uses statistical analysis (Z-scores) to determine when to trigger inference
 type InferenceService struct {
-	devices map[string]*DeviceInferenceState
-	mu      sync.RWMutex
+	db *database.ClickHouseDB
 
-	// Thresholds for triggering inference
-	temperatureThreshold float64 // °C
-	humidityThreshold    float64 // %
-	rateLimitDuration    time.Duration
+	// Configuration
+	pollingInterval time.Duration
+	dataWindow      time.Duration
+	baselineDays    int
+	zScoreThreshold float64
 
 	// Output channel for inference requests
 	InferenceReqChan chan *models.InferenceRequest
+
+	// Internal state
+	mu             sync.RWMutex
+	trackedDevices map[string]bool // Devices we've seen
 }
 
 // InferenceServiceConfig holds configuration for inference service
 type InferenceServiceConfig struct {
-	TemperatureThreshold float64       // °C change to trigger inference
-	HumidityThreshold    float64       // % change to trigger inference
-	RateLimitDuration    time.Duration // Minimum time between inferences per device
-	ChannelSize          int           // Size of inference request channel
+	PollingIntervalSeconds int     // How often to check for changes
+	DataWindowSeconds      int     // Time window for querying current data
+	HistoricalBaselineDays int     // Days of historical data for std dev
+	ZScoreThreshold        float64 // Threshold for triggering
+	ChannelSize            int     // Size of inference request channel
 }
 
 // DefaultInferenceServiceConfig returns default configuration
 func DefaultInferenceServiceConfig() InferenceServiceConfig {
 	return InferenceServiceConfig{
-		TemperatureThreshold: 0.5,             // 0.5°C
-		HumidityThreshold:    2.0,             // 2%
-		RateLimitDuration:    5 * time.Second, // Max once per 5 seconds
-		ChannelSize:          50,
+		PollingIntervalSeconds: 60,
+		DataWindowSeconds:      120,
+		HistoricalBaselineDays: 7,
+		ZScoreThreshold:        1.5,
+		ChannelSize:            50,
 	}
 }
 
-// NewInferenceService creates a new inference service
-func NewInferenceService(config InferenceServiceConfig) *InferenceService {
+// NewInferenceService creates a new CQRS-based inference service
+func NewInferenceService(db *database.ClickHouseDB, config InferenceServiceConfig) *InferenceService {
 	return &InferenceService{
-		devices:              make(map[string]*DeviceInferenceState),
-		temperatureThreshold: config.TemperatureThreshold,
-		humidityThreshold:    config.HumidityThreshold,
-		rateLimitDuration:    config.RateLimitDuration,
-		InferenceReqChan:     make(chan *models.InferenceRequest, config.ChannelSize),
+		db:               db,
+		pollingInterval:  time.Duration(config.PollingIntervalSeconds) * time.Second,
+		dataWindow:       time.Duration(config.DataWindowSeconds) * time.Second,
+		baselineDays:     config.HistoricalBaselineDays,
+		zScoreThreshold:  config.ZScoreThreshold,
+		InferenceReqChan: make(chan *models.InferenceRequest, config.ChannelSize),
+		trackedDevices:   make(map[string]bool),
 	}
 }
 
-// Start begins the inference service (currently passive, but can add background tasks)
+// Start begins the polling loop
 func (is *InferenceService) Start(ctx context.Context) {
-	log.Println("InferenceService: Starting...")
+	log.Println("InferenceService: Starting CQRS polling loop...")
+	log.Printf("InferenceService: Polling every %v, data window=%v, baseline=%d days, Z-threshold=%.2f",
+		is.pollingInterval, is.dataWindow, is.baselineDays, is.zScoreThreshold)
 
-	// This service is mostly passive (responds to updates)
-	// but we keep the Start method for consistency and future background tasks
+	ticker := time.NewTicker(is.pollingInterval)
+	defer ticker.Stop()
 
-	<-ctx.Done()
-	log.Println("InferenceService: Shutting down...")
+	// Initial poll
+	is.pollAllDevices(ctx)
 
-	// Close the output channel
-	close(is.InferenceReqChan)
-
-	log.Println("InferenceService: Shutdown complete")
-}
-
-// getOrCreateDevice gets or creates a device inference state
-func (is *InferenceService) getOrCreateDevice(deviceID string) *DeviceInferenceState {
-	is.mu.Lock()
-	defer is.mu.Unlock()
-
-	if state, exists := is.devices[deviceID]; exists {
-		return state
-	}
-
-	state := &DeviceInferenceState{
-		DeviceID: deviceID,
-	}
-	is.devices[deviceID] = state
-	return state
-}
-
-// UpdateTemperature updates temperature reading and checks for inference trigger
-func (is *InferenceService) UpdateTemperature(reading *models.TemperatureReading) {
-	state := is.getOrCreateDevice(reading.DeviceID)
-
-	state.mu.Lock()
-	previousTemp := state.LastTemperature
-	state.LastTemperature = reading
-	state.mu.Unlock()
-
-	// Check if temperature change is significant
-	shouldTrigger := false
-	if state.HasCompletedFirstInference && previousTemp != nil {
-		delta := math.Abs(reading.Value - previousTemp.Value)
-		if delta >= is.temperatureThreshold {
-			log.Printf("Significant temperature change for %s: %.2f°C (delta: %.2f°C)",
-				reading.DeviceID, reading.Value, delta)
-			shouldTrigger = true
-		}
-	}
-
-	if shouldTrigger {
-		is.triggerInference(state)
-	}
-}
-
-// UpdateHumidity updates humidity reading and checks for inference trigger
-func (is *InferenceService) UpdateHumidity(reading *models.HumidityReading) {
-	state := is.getOrCreateDevice(reading.DeviceID)
-
-	state.mu.Lock()
-	previousHumidity := state.LastHumidity
-	state.LastHumidity = reading
-	state.mu.Unlock()
-
-	// Check if humidity change is significant
-	shouldTrigger := false
-	if state.HasCompletedFirstInference && previousHumidity != nil {
-		delta := math.Abs(reading.Value - previousHumidity.Value)
-		if delta >= is.humidityThreshold {
-			log.Printf("Significant humidity change for %s: %.2f%% (delta: %.2f%%)",
-				reading.DeviceID, reading.Value, delta)
-			shouldTrigger = true
-		}
-	}
-
-	if shouldTrigger {
-		is.triggerInference(state)
-	}
-}
-
-// UpdateVolume updates sound volume and always triggers inference
-func (is *InferenceService) UpdateVolume(deviceID string, volume float64, timestamp time.Time) {
-	state := is.getOrCreateDevice(deviceID)
-
-	state.mu.Lock()
-	state.LastSoundVolume = &volume
-	state.LastSoundVolumeTimestamp = timestamp
-	state.mu.Unlock()
-
-	log.Printf("Sound volume updated for %s: %.2f dB (always triggers)", deviceID, volume)
-
-	// Volume always triggers inference
-	is.triggerInference(state)
-}
-
-// triggerInference creates and sends an inference request if conditions are met
-func (is *InferenceService) triggerInference(state *DeviceInferenceState) {
-	state.mu.Lock()
-	defer state.mu.Unlock()
-
-	// Check if we have all required sensors
-	if !state.HasCompletedFirstInference {
-		// First inference: require all 3 sensors
-		if state.LastTemperature == nil || state.LastHumidity == nil || state.LastSoundVolume == nil {
-			log.Printf("Incomplete sensor data for %s (first inference), skipping (temp=%v, humidity=%v, volume=%v)",
-				state.DeviceID,
-				state.LastTemperature != nil,
-				state.LastHumidity != nil,
-				state.LastSoundVolume != nil)
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("InferenceService: Shutting down...")
+			close(is.InferenceReqChan)
+			log.Println("InferenceService: Shutdown complete")
 			return
-		}
-	} else {
-		// Subsequent inferences: should always have data, but check anyway
-		if state.LastTemperature == nil || state.LastHumidity == nil || state.LastSoundVolume == nil {
-			log.Printf("Warning: Missing sensor data for %s after first inference, skipping",
-				state.DeviceID)
-			return
+		case <-ticker.C:
+			is.pollAllDevices(ctx)
 		}
 	}
+}
 
-	// Rate limiting: Don't trigger too frequently
-	if time.Since(state.LastInferenceTime) < is.rateLimitDuration {
-		log.Printf("Rate limiting inference for %s (last inference was %.1fs ago)",
-			state.DeviceID, time.Since(state.LastInferenceTime).Seconds())
+// pollAllDevices checks all known devices for inference triggers
+func (is *InferenceService) pollAllDevices(ctx context.Context) {
+	is.mu.RLock()
+	devices := make([]string, 0, len(is.trackedDevices))
+	for deviceID := range is.trackedDevices {
+		devices = append(devices, deviceID)
+	}
+	is.mu.RUnlock()
+
+	if len(devices) == 0 {
+		// Try to discover devices from device registry
+		// For now, we'll just wait for devices to appear through other means
 		return
+	}
+
+	log.Printf("InferenceService: Polling %d devices", len(devices))
+
+	for _, deviceID := range devices {
+		if ctx.Err() != nil {
+			return // Context cancelled
+		}
+		is.checkDevice(deviceID)
+	}
+}
+
+// checkDevice checks a single device and triggers inference if needed
+func (is *InferenceService) checkDevice(deviceID string) {
+	// Get last inference timestamp
+	lastInferenceTime, err := is.db.GetLastInferenceTimestamp(deviceID)
+	if err != nil {
+		log.Printf("InferenceService: Error getting last inference time for %s: %v", deviceID, err)
+		return
+	}
+
+	// Get current window aggregates
+	currentAgg, err := is.db.GetCurrentWindowAggregates(deviceID, int(is.dataWindow.Seconds()))
+	if err != nil {
+		log.Printf("InferenceService: Error getting current aggregates for %s: %v", deviceID, err)
+		return
+	}
+
+	if !currentAgg.HasData {
+		log.Printf("InferenceService: No current data for %s, skipping", deviceID)
+		return
+	}
+
+	// If no previous inference, trigger immediately
+	if lastInferenceTime.IsZero() {
+		log.Printf("InferenceService: First inference for %s, triggering immediately", deviceID)
+		is.triggerInference(deviceID, currentAgg, 0, 0, 0, "first_inference")
+		return
+	}
+
+	// Get last inference window aggregates
+	lastAgg, err := is.db.GetLastInferenceWindowAggregates(deviceID, lastInferenceTime, int(is.dataWindow.Seconds()))
+	if err != nil {
+		log.Printf("InferenceService: Error getting last inference aggregates for %s: %v", deviceID, err)
+		return
+	}
+
+	if !lastAgg.HasData {
+		log.Printf("InferenceService: No last inference data for %s, triggering", deviceID)
+		is.triggerInference(deviceID, currentAgg, 0, 0, 0, "missing_last_data")
+		return
+	}
+
+	// Get historical baseline statistics
+	baseline, err := is.db.GetHistoricalBaselineStats(deviceID, is.baselineDays)
+	if err != nil {
+		log.Printf("InferenceService: Error getting baseline stats for %s: %v", deviceID, err)
+		return
+	}
+
+	// Calculate Z-scores for each sensor type
+	tempZScore := is.calculateZScore(currentAgg.Temperature, lastAgg.Temperature, baseline.Temperature)
+	humidityZScore := is.calculateZScore(currentAgg.Humidity, lastAgg.Humidity, baseline.Humidity)
+	volumeZScore := is.calculateZScore(currentAgg.SoundVolume, lastAgg.SoundVolume, baseline.SoundVolume)
+
+	log.Printf("InferenceService: Device %s Z-scores: temp=%.2f, humidity=%.2f, volume=%.2f",
+		deviceID, tempZScore, humidityZScore, volumeZScore)
+
+	// Check if any Z-score exceeds threshold
+	shouldTrigger := false
+	triggerReason := ""
+
+	if math.Abs(tempZScore) >= is.zScoreThreshold {
+		shouldTrigger = true
+		triggerReason = "temperature_zscore"
+	}
+	if math.Abs(humidityZScore) >= is.zScoreThreshold {
+		shouldTrigger = true
+		if triggerReason != "" {
+			triggerReason += ",humidity_zscore"
+		} else {
+			triggerReason = "humidity_zscore"
+		}
+	}
+	if math.Abs(volumeZScore) >= is.zScoreThreshold {
+		shouldTrigger = true
+		if triggerReason != "" {
+			triggerReason += ",volume_zscore"
+		} else {
+			triggerReason = "volume_zscore"
+		}
+	}
+
+	if shouldTrigger {
+		log.Printf("InferenceService: Triggering inference for %s (reason: %s)", deviceID, triggerReason)
+		is.triggerInference(deviceID, currentAgg, tempZScore, humidityZScore, volumeZScore, triggerReason)
+	}
+}
+
+// calculateZScore computes normalized Z-score
+// Z = (current - last) / historical_std_dev
+func (is *InferenceService) calculateZScore(current, last, stdDev float64) float64 {
+	if stdDev == 0 {
+		// Avoid division by zero - if no variance, no significant change
+		return 0
+	}
+	return (current - last) / stdDev
+}
+
+// triggerInference creates and sends an inference request
+func (is *InferenceService) triggerInference(deviceID string, agg *database.SensorAggregates, tempZ, humidityZ, volumeZ float64, reason string) {
+	// Save inference history
+	err := is.db.SaveInferenceHistory(deviceID, reason, tempZ, humidityZ, volumeZ)
+	if err != nil {
+		log.Printf("InferenceService: Error saving inference history for %s: %v", deviceID, err)
 	}
 
 	// Create inference request
 	request := &models.InferenceRequest{
-		DeviceID:    state.DeviceID,
+		DeviceID:    deviceID,
 		Timestamp:   time.Now(),
-		Temperature: state.LastTemperature.Value,
-		Humidity:    state.LastHumidity.Value,
-		SoundVolume: *state.LastSoundVolume,
-	}
-
-	log.Printf("Triggering inference for %s (temp=%.2f°C, humidity=%.2f%%, volume=%.2f dB)",
-		state.DeviceID, request.Temperature, request.Humidity, request.SoundVolume)
-
-	// Update last inference time
-	state.LastInferenceTime = time.Now()
-
-	// Mark first inference as completed
-	if !state.HasCompletedFirstInference {
-		state.HasCompletedFirstInference = true
-		log.Printf("Completed first inference for %s", state.DeviceID)
+		Temperature: agg.Temperature,
+		Humidity:    agg.Humidity,
+		SoundVolume: agg.SoundVolume,
 	}
 
 	// Send request to channel (non-blocking with timeout)
 	select {
 	case is.InferenceReqChan <- request:
-		log.Printf("Inference request sent for %s", state.DeviceID)
+		log.Printf("InferenceService: Inference request sent for %s (temp=%.2f°C, humidity=%.2f%%, volume=%.2f dB)",
+			deviceID, request.Temperature, request.Humidity, request.SoundVolume)
 	case <-time.After(1 * time.Second):
-		log.Printf("Warning: Inference request channel full, dropping request for %s", state.DeviceID)
+		log.Printf("InferenceService: Warning - Inference request channel full, dropping request for %s", deviceID)
 	}
 }
 
-// GetDeviceState returns the current inference state for a device (for debugging/monitoring)
-func (is *InferenceService) GetDeviceState(deviceID string) *DeviceInferenceState {
-	is.mu.RLock()
-	defer is.mu.RUnlock()
-	return is.devices[deviceID]
+// RegisterDevice adds a device to the tracking list
+func (is *InferenceService) RegisterDevice(deviceID string) {
+	is.mu.Lock()
+	defer is.mu.Unlock()
+
+	if !is.trackedDevices[deviceID] {
+		is.trackedDevices[deviceID] = true
+		log.Printf("InferenceService: Now tracking device %s", deviceID)
+	}
 }
 
-// GetAllDevices returns all device IDs being tracked
-func (is *InferenceService) GetAllDevices() []string {
+// GetTrackedDevices returns all tracked device IDs
+func (is *InferenceService) GetTrackedDevices() []string {
 	is.mu.RLock()
 	defer is.mu.RUnlock()
 
-	devices := make([]string, 0, len(is.devices))
-	for deviceID := range is.devices {
+	devices := make([]string, 0, len(is.trackedDevices))
+	for deviceID := range is.trackedDevices {
 		devices = append(devices, deviceID)
 	}
 	return devices

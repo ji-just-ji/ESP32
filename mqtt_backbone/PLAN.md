@@ -1,605 +1,435 @@
-# Implementation Plan: IoT Backend v1.0
+# MQTT Backbone Service Implementation Plan
 
 ## Overview
 
-Refactor existing Go backend and add Python ML microservice with Grafana dashboard for IoT sensor monitoring and automated window control.
-
-## Architecture Summary
-
-**MQTT Topics**:
-- Input: `sensor/{device_id}/temperature`, `sensor/{device_id}/humidity`, `sensor/{device_id}/audio`
-- Inference: `ml/inference/request/{device_id}` (Go → Python)
-- Control: `window/{device_id}/control` (Python → ESP32 & Go)
-
-**Data Flow**:
-ESP32 → Go Backend (store to ClickHouse) → Detect changes → Publish inference request → Python ML Service (PyTorch) → Publish control action → ESP32 & Go Backend (logging)
-
-**Key Decisions**:
-- Audio: Buffered WAV/PCM recordings sent periodically
-- Window Control: Continuous (0-100%)
-- Predictions: Event-based (on significant changes)
-- Scale: 2-10 devices
+This document describes the implementation of CQRS-based inference triggering for the MQTT Backbone Go service. This replaces the previous event-driven (sensor arrival) approach with a time-based polling system that uses statistical analysis to determine when to trigger ML inference.
 
 ---
 
-## Phase 1: Refactor Go Backend for Multi-Topic MQTT
+## Current Status: ✅ COMPLETE
 
-### Tasks
-
-1. ✅ **Update Data Models** (`internal/models/`)
-   - ✅ Create separate structs for Temperature, Humidity, Audio
-   - ✅ Update WindowAction for continuous position (0-100%)
-   - ✅ Add Device model
-   - ✅ Add InferenceRequest and InferenceResponse models
-
-2. ✅ **Refactor MQTT Client** (`internal/mqtt/`)
-   - ✅ Update `client.go` to support multiple topic subscriptions
-   - ✅ Create `multi_topic.go` with topic-specific handlers
-   - ✅ Add handler for `temperature`, `humidity`, `audio` topics
-   - ✅ Add publisher for `ml/inference/request/{device_id}`
-   - ✅ Add subscriber for `window/+/control` for logging
-
-3. ✅ **Create Sensor Aggregator** (`internal/aggregator/`)
-   - ✅ New package: `sensor_buffer.go`
-   - ✅ Buffer sensor data per device
-   - ✅ Implement change detection logic (thresholds)
-   - ✅ Aggregate and prepare inference request payload
-
-4. ✅ **Update ClickHouse Schema** (`internal/database/`)
-   - ✅ Create `schema.go` with all table definitions
-   - ✅ Add separate tables: `sensor_temperature`, `sensor_humidity`, `sensor_audio`
-   - ✅ Update `window_actions` for continuous position
-   - ✅ Add `device_registry` table
-   - ✅ Add `ml_predictions` table
-   - ✅ Update `clickhouse.go` with new save methods
-
-5. ✅ **Update Configuration** (`pkg/config/`)
-   - ✅ Add multi-topic configuration
-   - ✅ Add change detection thresholds
-   - ✅ Add inference request topic config
-
-6. ✅ **Update Main Application** (`cmd/server/main.go`)
-   - ✅ Initialize multi-topic MQTT subscriptions
-   - ✅ Set up sensor aggregator
-   - ✅ Wire up inference request publisher
-   - ✅ Add window control subscriber for logging
-
-### Files to Modify/Create
-```
-backend/internal/models/
-  ├── sensor.go (update)
-  ├── audio.go (new)
-  └── device.go (new)
-
-backend/internal/mqtt/
-  ├── client.go (update)
-  └── multi_topic.go (new)
-
-backend/internal/aggregator/
-  └── sensor_buffer.go (new)
-
-backend/internal/database/
-  ├── clickhouse.go (update)
-  └── schema.go (new)
-
-backend/pkg/config/
-  └── config.go (update)
-
-backend/cmd/server/
-  └── main.go (update)
-```
+**Version:** v2.0 - CQRS-Based Inference Triggering
+**Completed:** 2025-10-29
 
 ---
 
-## Phase 1.5: Refactor ML Inference Logic + Channel-Based Architecture
+## Architecture Change: Event-Driven → CQRS Polling
 
-### Overview
-
-Refactor the inference trigger logic and architecture to:
-1. Use sound volume (dB) instead of full audio data for ML inference
-2. Handle sensors arriving separately (first inference requires all 3, then use most recent values)
-3. Implement channel-based communication between MQTT layer and services
-4. Separate API/transport layer (MQTT) from business logic (services)
-
-### Tasks
-
-1. ✅ **Update Documentation**
-   - ✅ Update SPEC.md with new ML features (sound volume instead of audio features)
-   - ✅ Update inference request format to use `sound_volume` field
-   - ✅ Update prediction trigger logic documentation
-   - ✅ Update database schema in spec (sound_volume instead of audio_hash)
-
-2. **Create Audio Processing Module** (`internal/aggregator/audio_processor.go`)
-   - Implement `ExtractSoundVolume(audioData []byte, sampleRate int) float64`
-   - Parse 16-bit PCM samples from audio data
-   - Calculate RMS: sqrt(mean(samples²))
-   - Convert to dB: 20*log10(RMS/32768.0)
-   - Handle edge cases (silence, invalid data)
-
-3. **Update Data Models** (`internal/models/sensor.go`)
-   - Modify `InferenceRequest`:
-     - Remove: `AudioData string`, `AudioMetadata AudioMetadata`
-     - Add: `SoundVolume float64`
-   - Modify `WindowAction`:
-     - Replace: `AudioHash string` with `SoundVolume float64`
-
-4. **Create Services Layer** (New package: `internal/services/`)
-
-   **SensorService** (`sensor_service.go`):
-   - Struct with channels: `TempChan`, `HumidityChan`, `AudioChan`
-   - Dependencies: database client, inference service
-   - Methods:
-     - `Start(ctx context.Context)` - goroutine listening to sensor channels
-     - `processTemperature()` - save to DB, forward to inference service
-     - `processHumidity()` - save to DB, forward to inference service
-     - `processAudio()` - extract volume, save metadata to DB, forward to inference service
-
-   **InferenceService** (`inference_service.go`):
-   - Struct with output channel: `InferenceReqChan`
-   - Dependencies: sensor aggregator
-   - Buffering logic:
-     - Track latest temp, humidity, volume per device
-     - Track `HasCompletedFirstInference` per device
-     - First inference: require all 3 sensors
-     - Subsequent: always use most recent values
-   - Methods:
-     - `Start(ctx context.Context)` - goroutine for processing
-     - `UpdateTemperature()` - check threshold, maybe trigger
-     - `UpdateHumidity()` - check threshold, maybe trigger
-     - `UpdateVolume()` - always triggers inference
-     - `triggerInference()` - validate, create request, write to channel
-
-5. **Refactor MQTT Layer** (`internal/mqtt/`)
-
-   **New: subscriber.go**:
-   - `Subscriber` struct with output channels
-   - Subscribe to all sensor topics
-   - Parse messages, write to channels
-   - No business logic, pure transport
-
-   **New: publisher.go**:
-   - `Publisher` struct with input channels
-   - `Start(ctx context.Context)` - goroutine reading from `InferenceReqChan`
-   - Publish to MQTT when requests arrive
-   - No business logic, pure transport
-
-   **Update: client.go**:
-   - Simplify to low-level MQTT connection management
-   - Remove handler callbacks
-   - Keep connection, reconnection logic
-
-6. **Update Sensor Aggregator** (`internal/aggregator/sensor_buffer.go`)
-   - Add fields: `LastSoundVolume *float64`, `HasCompletedFirstInference bool`
-   - Remove: `onInferenceNeeded` callback (services layer handles this now)
-   - Add method: `IsReadyForInference() bool` - checks if all 3 sensors present
-   - Simplify to state tracking only
-
-7. **Update Database Layer** (`internal/database/`)
-   - Update `schema.go`: `window_actions` table with `sound_volume Float64`
-   - Update `clickhouse.go`:
-     - Modify `SaveWindowAction()` to use sound_volume
-     - Update insert queries
-
-8. **Update Main Application** (`cmd/server/main.go`)
-   - Create all channels (temp, humidity, audio, window control, inference request)
-   - Initialize services with channels and dependencies
-   - Wire: MQTT subscriber → channels → sensor service → inference service → channels → MQTT publisher
-   - Start all goroutines (subscriber, services, publisher)
-   - Implement graceful shutdown with context cancellation
-
-### New Architecture Flow
-
+### Before (v1.5): Event-Driven Architecture
 ```
-ESP32 Sensors
-    ↓ MQTT
-┌─────────────────────────────────────┐
-│ MQTT Subscriber (mqtt/subscriber.go)│
-│  - Parse messages                   │
-│  - Write to channels                │
-└────────┬────────────────────────────┘
-         ↓ (channels)
-┌─────────────────────────────────────┐
-│ Sensor Service (services/)          │
-│  - Read from sensor channels        │
-│  - Save to ClickHouse               │
-│  - Extract volume from audio        │
-│  - Forward to InferenceService      │
-└────────┬────────────────────────────┘
-         ↓
-┌─────────────────────────────────────┐
-│ Inference Service (services/)       │
-│  - Buffer sensor data per device    │
-│  - Apply trigger logic              │
-│  - Generate InferenceRequest        │
-│  - Write to channel                 │
-└────────┬────────────────────────────┘
-         ↓ (channel)
-┌─────────────────────────────────────┐
-│ MQTT Publisher (mqtt/publisher.go)  │
-│  - Read from inference channel      │
-│  - Publish to MQTT                  │
-└─────────────────────────────────────┘
-         ↓ MQTT
-    Python ML Service
+MQTT Sensor Data → Sensor Service → Inference Service (in-memory state)
+                                    ↓
+                              Check thresholds immediately
+                                    ↓
+                              Trigger if threshold exceeded
+                                    ↓
+                              Inference Request → MQTT
 ```
 
-### Files to Create
+**Limitations:**
+- Coupled to sensor polling rates (variable)
+- Simple threshold-based triggering
+- No historical context
+- Immediate processing may miss patterns
 
+### After (v2.0): CQRS Polling Architecture
 ```
-backend/internal/services/
-  ├── sensor_service.go (new)
-  └── inference_service.go (new)
-
-backend/internal/mqtt/
-  ├── subscriber.go (new)
-  └── publisher.go (new)
-
-backend/internal/aggregator/
-  └── audio_processor.go (new)
-```
-
-### Files to Modify
-
-```
-backend/PLAN.md (this file)
-backend/internal/models/sensor.go
-backend/internal/aggregator/sensor_buffer.go
-backend/internal/database/schema.go
-backend/internal/database/clickhouse.go
-backend/internal/mqtt/client.go
-backend/cmd/server/main.go
+MQTT Sensor Data → Sensor Service → ClickHouse (write model)
+                                          ↓
+                                    [Time passes]
+                                          ↓
+Inference Service (polling ticker) → Query ClickHouse (read model)
+                                          ↓
+                              Compare current window to last inference
+                                          ↓
+                              Calculate Z-scores vs historical baseline
+                                          ↓
+                              Trigger if Z-score > threshold
+                                          ↓
+                              Inference Request → MQTT
 ```
 
-### Success Criteria
-
-- ✅ Sound volume (dB) extracted from audio data
-- ✅ First inference requires all 3 sensor types (temp, humidity, volume)
-- ✅ Subsequent inferences always use most recent values
-- ✅ MQTT layer is pure transport (no business logic)
-- ✅ Services layer handles all business logic
-- ✅ Go channels provide clean separation between layers
-- ✅ Graceful shutdown with context cancellation
-- ✅ All existing functionality preserved
+**Benefits:**
+- Decoupled from sensor polling rates
+- Statistical rigor (Z-score based)
+- Historical context (baseline from N days)
+- Configurable time windows
+- Predictable inference frequency
 
 ---
 
-## Phase 2: Create Python ML Microservice
+## Implementation Details
 
-### Tasks
+### 1. Database Schema Updates
 
-1. **Project Structure**
-   ```
-   ml-service/
-   ├── Dockerfile
-   ├── requirements.txt
-   ├── config.yaml
-   ├── src/
-   │   ├── __init__.py
-   │   ├── main.py
-   │   ├── mqtt_client.py
-   │   ├── audio_processor.py
-   │   ├── model_loader.py
-   │   └── predictor.py
-   ├── models/
-   │   └── window_regressor.pth
-   └── tests/
-       └── test_predictor.py
-   ```
-
-2. **MQTT Client** (`mqtt_client.py`)
-   - Subscribe to `ml/inference/request/#`
-   - Publish to `window/{device_id}/control`
-   - Handle connection/reconnection
-   - QoS 1 for reliable delivery
-
-3. **Audio Processor** (`audio_processor.py`)
-   - Decode base64 audio data
-   - Extract features using librosa:
-     - MFCC
-     - Spectral centroid
-     - Spectral rolloff
-     - RMS energy
-     - Zero-crossing rate
-   - Optional: Save raw audio files
-
-4. **Model Loader** (`model_loader.py`)
-   - Load PyTorch model from .pth file
-   - Validate model on startup
-   - Support model versioning
-   - Handle model loading errors gracefully
-
-5. **Predictor** (`predictor.py`)
-   - Combine audio features with temp/humidity
-   - Run model inference
-   - Calculate confidence score
-   - Return window position (0-100%)
-
-6. **Main Application** (`main.py`)
-   - Load configuration
-   - Initialize MQTT client
-   - Set up message handlers
-   - Orchestrate prediction pipeline
-   - Logging and error handling
-
-7. **Configuration** (`config.yaml`)
-   - MQTT broker settings
-   - Model path and version
-   - Audio processing parameters
-   - Feature extraction settings
-   - Storage options
-
-8. **Dependencies** (`requirements.txt`)
-   ```
-   paho-mqtt>=1.6.1
-   torch>=2.0.0
-   librosa>=0.10.0
-   numpy>=1.24.0
-   soundfile>=0.12.0
-   pyyaml>=6.0
-   ```
-
-9. **Dockerfile**
-   - Python 3.9+ base image
-   - Install dependencies
-   - Copy source code and models
-   - Entry point: `python src/main.py`
-
-### Files to Create
+**Added `sound_volume` field to `sensor_audio` table:**
+```sql
+CREATE TABLE sensor_audio (
+    timestamp DateTime64(3),
+    device_id String,
+    sample_rate UInt32,
+    duration Float64,
+    format String,
+    audio_hash String,
+    sound_volume Float64,  -- NEW: Extracted dB value
+    features String
+) ENGINE = MergeTree()
+ORDER BY (device_id, timestamp)
 ```
-ml-service/
-├── Dockerfile
-├── requirements.txt
-├── config.yaml
-├── src/
-│   ├── __init__.py
-│   ├── main.py
-│   ├── mqtt_client.py
-│   ├── audio_processor.py
-│   ├── model_loader.py
-│   └── predictor.py
-├── models/
-│   └── .gitkeep
-└── tests/
-    └── test_predictor.py
+
+**Added `inference_history` table:**
+```sql
+CREATE TABLE inference_history (
+    timestamp DateTime64(3),
+    device_id String,
+    trigger_reason String,
+    temp_z_score Float64,
+    humidity_z_score Float64,
+    volume_z_score Float64
+) ENGINE = MergeTree()
+ORDER BY (device_id, timestamp)
+```
+
+**Purpose:**
+- `sound_volume`: Store extracted volume for querying (CQRS read model)
+- `inference_history`: Track when inferences were triggered and why
+
+### 2. Configuration Parameters
+
+**New CQRS Configuration (pkg/config/config.go):**
+```go
+// CQRS Inference Configuration
+InferencePollingIntervalSeconds int     // How often to poll ClickHouse (default: 60)
+InferenceDataWindowSeconds      int     // Time window for current data (default: 120)
+InferenceHistoricalBaselineDays int     // Days for std dev calculation (default: 7)
+InferenceZScoreThreshold        float64 // Trigger threshold (default: 1.5)
+```
+
+**Environment Variables:**
+- `INFERENCE_POLLING_INTERVAL_SECONDS` - Polling frequency
+- `INFERENCE_DATA_WINDOW_SECONDS` - Data aggregation window
+- `INFERENCE_HISTORICAL_BASELINE_DAYS` - Historical baseline period
+- `INFERENCE_Z_SCORE_THRESHOLD` - Z-score threshold for triggering
+
+### 3. ClickHouse Query Methods
+
+**New query methods in `internal/database/clickhouse.go`:**
+
+1. **`SaveInferenceHistory`** - Record when inference was triggered
+2. **`GetLastInferenceTimestamp`** - Get timestamp of last inference per device
+3. **`GetCurrentWindowAggregates`** - Get mean(temp, humidity, volume) for current window
+4. **`GetLastInferenceWindowAggregates`** - Get mean values from last inference window
+5. **`GetHistoricalBaselineStats`** - Get std dev over historical period (N days)
+
+**Query Pattern:**
+```sql
+-- Current window (e.g., last 2 minutes)
+SELECT avg(value) FROM sensor_temperature
+WHERE device_id = ? AND timestamp >= NOW() - INTERVAL 120 SECOND
+
+-- Historical baseline (e.g., last 7 days)
+SELECT stddevPop(value) FROM sensor_temperature
+WHERE device_id = ? AND timestamp >= NOW() - INTERVAL 7 DAY
+```
+
+### 4. Inference Service Refactor
+
+**Complete rewrite of `internal/services/inference_service.go`:**
+
+**Key Changes:**
+- Removed in-memory state (`DeviceInferenceState`)
+- Removed event-driven methods (`UpdateTemperature`, `UpdateHumidity`, `UpdateVolume`)
+- Removed threshold-based triggering
+- Added polling loop with `time.Ticker`
+- Added Z-score calculation logic
+- Added device tracking (`RegisterDevice`)
+
+**Core Algorithm:**
+```go
+For each device (every N seconds):
+    1. Get current window aggregates (mean temp, humidity, volume)
+    2. Get last inference timestamp
+    3. Get last inference window aggregates
+    4. Get historical baseline (std dev over M days)
+    5. Calculate Z-scores:
+       Z_temp = (current_temp - last_temp) / baseline_std_temp
+       Z_humidity = (current_humidity - last_humidity) / baseline_std_humidity
+       Z_volume = (current_volume - last_volume) / baseline_std_volume
+    6. If ANY |Z-score| > threshold:
+       - Trigger inference
+       - Save to inference_history
+       - Send InferenceRequest to MQTT
+```
+
+**Z-Score Calculation:**
+```go
+Z = (mean(current_window) - mean(last_inference_window)) / std_dev(historical_baseline)
+```
+
+**Trigger Conditions:**
+- First inference: Always trigger (no baseline)
+- Subsequent: Trigger if |Z_temp| > threshold OR |Z_humidity| > threshold OR |Z_volume| > threshold
+
+### 5. Sensor Service Updates
+
+**Changes to `internal/services/sensor_service.go`:**
+
+1. **Audio Processing:**
+   - Now saves `sound_volume` to database via updated `SaveAudio(recording, audioHash, volume)`
+   - Removed direct forwarding to inference service
+
+2. **Temperature/Humidity Processing:**
+   - Removed forwarding to inference service
+   - Only saves to database
+
+3. **Device Registration:**
+   - Added `inferenceService.RegisterDevice(deviceID)` call
+   - Ensures inference service tracks all active devices
+
+**Rationale:** Sensor service is now purely a write-side handler (CQRS write model)
+
+### 6. Main Application Updates
+
+**Changes to `cmd/server/main.go`:**
+
+1. **Inference Service Initialization:**
+```go
+// v1.5 (old)
+inferenceConfig := services.InferenceServiceConfig{
+    TemperatureThreshold: 0.5,
+    HumidityThreshold:    2.0,
+    RateLimitDuration:    5 * time.Second,
+}
+inferenceService := services.NewInferenceService(inferenceConfig)
+
+// v2.0 (new)
+inferenceConfig := services.InferenceServiceConfig{
+    PollingIntervalSeconds: cfg.InferencePollingIntervalSeconds,
+    DataWindowSeconds:      cfg.InferenceDataWindowSeconds,
+    HistoricalBaselineDays: cfg.InferenceHistoricalBaselineDays,
+    ZScoreThreshold:        cfg.InferenceZScoreThreshold,
+}
+inferenceService := services.NewInferenceService(db, inferenceConfig)
+```
+
+2. **Version Update:** v1.5 → v2.0
+
+---
+
+## Testing & Validation
+
+### Test Scenarios
+
+1. **First Inference:**
+   - Device sends first batch of sensor data
+   - Inference triggers immediately (no baseline)
+   - Verify `inference_history` record created
+
+2. **Z-Score Triggering:**
+   - Generate stable sensor data for baseline period
+   - Introduce significant change (>1.5 std dev)
+   - Verify inference triggers
+   - Verify Z-scores logged correctly
+
+3. **No Trigger:**
+   - Generate stable sensor data
+   - Make small changes (<1.5 std dev)
+   - Verify no inference triggered
+
+4. **Multi-Device:**
+   - Test with 2-3 devices simultaneously
+   - Verify independent tracking per device
+   - Verify correct device isolation
+
+5. **Configuration Changes:**
+   - Test different polling intervals
+   - Test different Z-score thresholds
+   - Test different baseline periods
+
+### Validation Queries
+
+```sql
+-- Check inference history
+SELECT * FROM inference_history ORDER BY timestamp DESC LIMIT 10;
+
+-- Check Z-scores over time
+SELECT
+    timestamp,
+    device_id,
+    temp_z_score,
+    humidity_z_score,
+    volume_z_score
+FROM inference_history
+WHERE device_id = 'device_01'
+ORDER BY timestamp DESC;
+
+-- Check sensor data availability
+SELECT
+    COUNT(*) as count,
+    AVG(value) as avg_value,
+    STDDEV(value) as std_dev
+FROM sensor_temperature
+WHERE device_id = 'device_01'
+AND timestamp >= NOW() - INTERVAL 7 DAY;
 ```
 
 ---
 
-## Phase 3: Integration & Testing
+## Performance Considerations
 
-### Tasks
+### Database Load
 
-1. **Update Docker Compose**
-   - Add Python ML service
-   - Configure service dependencies
-   - Add volume for ML models
-   - Ensure all services on same network
+**Queries per polling interval (per device):**
+- 1x `GetLastInferenceTimestamp`
+- 1x `GetCurrentWindowAggregates` (3 sensor tables)
+- 1x `GetLastInferenceWindowAggregates` (3 sensor tables)
+- 1x `GetHistoricalBaselineStats` (3 sensor tables)
 
-2. **End-to-End Testing**
-   - Create test MQTT publishers for each sensor type
-   - Simulate ESP32 devices
-   - Test complete data flow
-   - Verify ClickHouse data storage
-   - Verify window control outputs
+**Total:** ~8 queries per device per polling interval
 
-3. **Integration Tests**
-   - Test MQTT communication between services
-   - Test inference request/response flow
-   - Test error handling
-   - Test reconnection logic
+**Optimization Strategies:**
+1. Increase polling interval (60s → 120s)
+2. Add query caching for historical baseline (slow-changing)
+3. Use materialized views for aggregates
+4. Batch device queries
 
-4. **Test Scripts** (`scripts/`)
-   - `test_temp_publisher.py` - Simulate temperature data
-   - `test_humidity_publisher.py` - Simulate humidity data
-   - `test_audio_publisher.py` - Simulate audio recordings
-   - `test_multi_device.py` - Simulate multiple devices
-   - `monitor_window_control.py` - Monitor control outputs
+### Memory Usage
 
-### Files to Modify/Create
+- No in-memory state per device (unlike v1.5)
+- Minimal: Only tracked device IDs map
+- Scales linearly with device count
+
+---
+
+## Migration from v1.5 to v2.0
+
+### Breaking Changes
+
+1. **Configuration:**
+   - Old: `TEMPERATURE_THRESHOLD`, `HUMIDITY_THRESHOLD`
+   - New: `INFERENCE_POLLING_INTERVAL_SECONDS`, `INFERENCE_DATA_WINDOW_SECONDS`, etc.
+
+2. **Inference Behavior:**
+   - Old: Immediate triggering on sensor arrival
+   - New: Time-based polling with statistical analysis
+
+3. **Database Schema:**
+   - New: `sound_volume` column in `sensor_audio`
+   - New: `inference_history` table
+
+### Migration Steps
+
+1. **Update Configuration:**
+   - Add new CQRS config parameters to `.env`
+   - Can keep old params for backward compatibility (not used)
+
+2. **Update Database:**
+   - ClickHouse will auto-create new tables on startup
+   - `sound_volume` field defaults to 0 for old records
+
+3. **Deploy:**
+   - Stop v1.5 service
+   - Deploy v2.0 binary
+   - Service will auto-initialize schema
+
+4. **Warm-up Period:**
+   - First N days will build historical baseline
+   - Early inferences may trigger frequently (expected)
+
+---
+
+## Monitoring & Observability
+
+### Key Metrics
+
+1. **Inference Frequency:**
+   - Count of inference triggers per device per hour
+   - Query: `SELECT COUNT(*) FROM inference_history WHERE timestamp >= NOW() - INTERVAL 1 HOUR`
+
+2. **Z-Score Distribution:**
+   - Distribution of Z-scores across all triggers
+   - Helps tune threshold
+
+3. **Polling Performance:**
+   - Query execution time for aggregates
+   - Should be <100ms per device
+
+4. **Device Coverage:**
+   - Number of tracked devices
+   - Log: "InferenceService: Polling N devices"
+
+### Logging
+
+**Inference Service Logs:**
 ```
-backend/docker-compose.yml (update)
-backend/scripts/
-  ├── test_temp_publisher.py (new)
-  ├── test_humidity_publisher.py (new)
-  ├── test_audio_publisher.py (new)
-  ├── test_multi_device.py (new)
-  └── monitor_window_control.py (new)
+InferenceService: Starting CQRS polling loop...
+InferenceService: Polling every 1m0s, data window=2m0s, baseline=7 days, Z-threshold=1.50
+InferenceService: Polling 3 devices
+InferenceService: Device device_01 Z-scores: temp=0.23, humidity=0.45, volume=2.14
+InferenceService: Triggering inference for device_01 (reason: volume_zscore)
 ```
 
 ---
 
-## Phase 4: Grafana Dashboard Setup
+## Future Enhancements
 
-### Tasks
+### Potential Improvements
 
-1. **Update Docker Compose**
-   - Add Grafana service (port 3000)
-   - Add volume for Grafana data
-   - Add volume for dashboard provisioning
+1. **Adaptive Thresholds:**
+   - Per-device Z-score thresholds
+   - Time-of-day adjustments
 
-2. **ClickHouse Datasource**
-   - Create datasource configuration file
-   - Configure connection to ClickHouse
-   - Set up provisioning
+2. **Composite Scoring:**
+   - Weighted combination of Z-scores
+   - Machine learning for trigger prediction
 
-3. **Dashboard Templates**
-   - **System Overview** (`overview.json`)
-     - Time-series: Temperature by device
-     - Time-series: Humidity by device
-     - Gauge: Current window positions
-     - Stat: Active devices count
-     - Table: Recent predictions
+3. **Query Optimization:**
+   - Materialized views for aggregates
+   - Cached historical baselines (updated daily)
 
-   - **Device Detail** (`device-detail.json`)
-     - Variable: device_id selector
-     - Time-series: Temperature history
-     - Time-series: Humidity history
-     - Time-series: Window position history
-     - Bar chart: Audio activity
+4. **Multi-Window Analysis:**
+   - Compare multiple time windows
+   - Trend detection (rising, falling, stable)
 
-   - **ML Metrics** (`ml-metrics.json`)
-     - Time-series: Prediction frequency
-     - Histogram: Confidence distribution
-     - Time-series: Inference latency
-     - Table: Model performance
-
-   - **System Health** (`system-health.json`)
-     - Stat: Message throughput
-     - Time-series: Error rates
-     - Table: Device last seen
-     - Heatmap: Device activity
-
-4. **Provisioning Configuration**
-   - Auto-provision datasource on startup
-   - Auto-load dashboards on startup
-   - Set default home dashboard
-
-### Files to Create
-```
-grafana/
-├── provisioning/
-│   ├── datasources/
-│   │   └── clickhouse.yml
-│   └── dashboards/
-│       └── default.yml
-└── dashboards/
-    ├── overview.json
-    ├── device-detail.json
-    ├── ml-metrics.json
-    └── system-health.json
-```
+5. **Device Discovery:**
+   - Auto-discover devices from `device_registry`
+   - No manual registration needed
 
 ---
 
-## Phase 5: Device Management & Health Monitoring
+## References
 
-### Tasks
+### Related Documentation
+- **Project Specification:** `/SPEC.md` (root)
+- **Project Plan:** `/PLAN.md` (root)
+- **Backend Specification:** `mqtt_backbone/SPEC.md`
 
-1. **Device Registry** (Go Backend)
-   - Auto-register devices on first message
-   - Update last_seen timestamp
-   - Track device health status
-   - Store device configurations
-
-2. **Health Monitoring**
-   - Periodic health checks
-   - Detect inactive devices
-   - MQTT connection monitoring
-   - Database connection monitoring
-
-3. **Metrics Collection**
-   - Message processing rate
-   - Inference latency
-   - Database write latency
-   - Error rates by type
-
-4. **Logging Enhancements**
-   - Structured JSON logging
-   - Log levels (DEBUG, INFO, WARN, ERROR)
-   - Request tracing (correlation IDs)
-
-### Files to Modify/Create
-```
-backend/internal/device/
-  └── registry.go (new)
-
-backend/internal/health/
-  └── monitor.go (new)
-
-backend/internal/metrics/
-  └── collector.go (new)
-```
+### ClickHouse Documentation
+- [Aggregate Functions](https://clickhouse.com/docs/en/sql-reference/aggregate-functions/)
+- [DateTime Functions](https://clickhouse.com/docs/en/sql-reference/functions/date-time-functions/)
+- [Window Functions](https://clickhouse.com/docs/en/sql-reference/window-functions/)
 
 ---
 
-## Phase 6: Documentation & Deployment
+## Revision History
 
-### Tasks
-
-1. **Update Documentation**
-   - Update README.md with new architecture
-   - Update QUICKSTART.md with all services
-   - Add ML service deployment guide
-   - Add model training guide
-   - Add troubleshooting guide
-
-2. **Environment Configuration**
-   - Update `.env.example` with all new variables
-   - Document all configuration options
-   - Add validation for required configs
-
-3. **Deployment Guides**
-   - Local development setup
-   - Docker deployment
-   - Production considerations
-   - Scaling guidelines
-
-4. **API Documentation**
-   - Document MQTT topic structure
-   - Document message formats
-   - Document database schema
-   - Add sequence diagrams
-
-### Files to Modify/Create
-```
-backend/README.md (update)
-backend/QUICKSTART.md (update)
-backend/.env.example (update)
-backend/docs/
-  ├── DEPLOYMENT.md (new)
-  ├── MODEL_TRAINING.md (new)
-  ├── TROUBLESHOOTING.md (new)
-  └── API.md (new)
-```
+| Version | Date       | Changes                                    |
+|---------|------------|-------------------------------------------|
+| 2.0     | 2025-10-29 | Complete CQRS-based inference triggering  |
+| 1.5     | 2025-10-27 | Channel-based architecture (deprecated)   |
+| 1.0     | 2025-10-24 | Initial implementation (deprecated)       |
 
 ---
 
-## Timeline Estimate
+## Summary
 
-| Phase | Duration | Dependencies |
-|-------|----------|--------------|
-| Phase 1: Go Backend Refactor | 3-4 days | None |
-| Phase 2: Python ML Service | 4-5 days | None (parallel) |
-| Phase 3: Integration & Testing | 2-3 days | Phase 1, 2 |
-| Phase 4: Grafana Dashboard | 2-3 days | Phase 1, 3 |
-| Phase 5: Device Management | 2-3 days | Phase 1 |
-| Phase 6: Documentation | 2-3 days | All phases |
+The v2.0 CQRS-based inference triggering system provides:
 
-**Total: 15-21 days**
+✅ **Decoupling** - Inference independent of sensor polling rates
+✅ **Statistical Rigor** - Z-score based triggering with historical context
+✅ **Configurability** - All parameters externalized via environment variables
+✅ **Scalability** - Database-driven approach scales with device count
+✅ **Observability** - Full history of inference triggers and Z-scores
+✅ **Maintainability** - Clear separation between write and read models
 
----
-
-## Success Criteria
-
-- [ ] Multi-topic MQTT working for all sensor types
-- [ ] ClickHouse storing data in separate tables
-- [ ] Python ML service receiving inference requests
-- [ ] PyTorch model making predictions
-- [ ] Window control commands published and logged
-- [ ] Grafana dashboards showing real-time data
-- [ ] Multiple devices supported (tested with 2-3)
-- [ ] End-to-end data flow working
-- [ ] All services in Docker Compose
-- [ ] Documentation complete and accurate
-
----
-
-## Risks & Mitigations
-
-| Risk | Impact | Mitigation |
-|------|--------|------------|
-| PyTorch model format incompatible | High | Create model export script, test early |
-| Audio processing too slow | Medium | Optimize feature extraction, add caching |
-| MQTT message size limits | Medium | Chunk large audio, adjust broker config |
-| ClickHouse schema changes | Low | Version migrations, test with sample data |
-| Service coordination complexity | Medium | Clear interfaces, extensive testing |
-
----
-
-## Next Steps
-
-1. ✅ Finalize specification
-2. ✅ Review and approve plan
-3. ⏳ Start Phase 1: Go Backend refactor
-4. ⏳ Start Phase 2: Python ML service (parallel)
-5. Continue through remaining phases
+This architecture provides a robust foundation for ML-driven IoT decision-making with predictable performance characteristics and transparent triggering logic.
