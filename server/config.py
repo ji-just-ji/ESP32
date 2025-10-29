@@ -1,7 +1,7 @@
 # -------------------------
 # MQTT Configuration
 # -------------------------
-MQTT_BROKER = "yourbroker"       # Replace with your MQTT broker address
+MQTT_BROKER = "localhost"       # Replace with your MQTT broker address
 MQTT_PORT = 1883                  # Standard MQTT port
 
 # MQTT Topics
@@ -14,9 +14,9 @@ TOPIC_SPEAKER = "esp32/audio_processed"  # Output anti-noise
 # -------------------------
 SAMPLE_RATE = 16000        # Hz
 CHUNK_SIZE = 256           # Number of samples per audio chunk
-FILTER_LENGTH = 128        # Adaptive filter length in samples
-MU = 0.01                  # Step size for LMS adaptive filter
-LATENCY_SAMPLES = 320      # Compensates for network + processing delay (~20 ms)
+FILTER_LENGTH = 2048        # Adaptive filter length in samples
+MU = 0.0005                 # Step size for LMS adaptive filter
+LATENCY_SAMPLES = 0      # Compensates for network + processing delay (~20 ms)
 
 # -------------------------
 # Audio Format Standardization
