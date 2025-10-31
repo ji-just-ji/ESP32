@@ -4,82 +4,11 @@
 
 Complete implementation plan for an intelligent IoT system featuring ESP32 sensors, MQTT messaging, Go-based backend processing, PyTorch ML inference, and real-time Grafana visualization.
 
-**Current Status:** Phase 1.5 Complete ✅ | Phase 5 Complete ✅ | Phase 2, 3, 4, 6, 7 Pending 📋
-
 ---
 
-## Project Phases
+## Project Parts
 
-### Phase 0: Infrastructure & Foundation ✅ COMPLETE
-
-**Goal:** Set up core infrastructure and development environment
-
-**Components:**
-- ✅ Docker Compose configuration
-- ✅ Mosquitto MQTT broker setup
-- ✅ ClickHouse database setup
-- ✅ Development environment configuration
-- ✅ Git repository structure
-
-**Duration:** 1-2 days
-
----
-
-### Phase 1: Go Backend - Multi-Topic MQTT ✅ COMPLETE
-
-**Goal:** Build Go backend service with separate MQTT topics for each sensor type
-
-**Key Achievements:**
-- ✅ Separate data models (Temperature, Humidity, Audio)
-- ✅ Multi-topic MQTT subscriptions
-- ✅ ClickHouse schema with separate tables
-- ✅ Sensor aggregation with change detection
-- ✅ Inference request publishing
-- ✅ Device auto-registration
-
-**Components:**
-- `mqtt_backbone/internal/models/` - Data structures
-- `mqtt_backbone/internal/mqtt/` - MQTT client
-- `mqtt_backbone/internal/aggregator/` - Sensor buffering
-- `mqtt_backbone/internal/database/` - ClickHouse integration
-
-**Duration:** 3-4 days (Completed)
-
-**Reference:** `mqtt_backbone/PLAN.md` - Phase 1
-
----
-
-### Phase 1.5: Backend Refactor - Channel-Based Architecture ✅ COMPLETE
-
-**Goal:** Refactor backend to use sound volume instead of full audio, implement channel-based architecture
-
-**Key Achievements:**
-- ✅ Audio → Sound volume (dB) conversion
-- ✅ Smart inference triggering (first needs all 3, then latest)
-- ✅ Channel-based architecture (MQTT ≠ Services)
-- ✅ Graceful shutdown with context cancellation
-- ✅ Clean separation: Transport / Business Logic / Persistence
-
-**New Components:**
-- `mqtt_backbone/internal/services/sensor_service.go` - Sensor processing
-- `mqtt_backbone/internal/services/inference_service.go` - Smart triggering
-- `mqtt_backbone/internal/mqtt/subscriber.go` - Channel-based subscriber
-- `mqtt_backbone/internal/mqtt/publisher.go` - Channel-based publisher
-- `mqtt_backbone/internal/aggregator/audio_processor.go` - Volume extraction
-
-**Architectural Improvements:**
-```
-Before (v1.0):  MQTT → Callbacks → Mixed Logic
-After (v1.5):   MQTT → Channels → Services → Channels → MQTT
-```
-
-**Duration:** 2-3 days (Completed)
-
-**Reference:** `mqtt_backbone/PLAN.md` - Phase 1.5
-
----
-
-### Phase 2: Python ML Service ⏳ IN PROGRESS
+### Python ML Service
 
 **Goal:** Implement PyTorch ML microservice for window control predictions
 
@@ -87,8 +16,8 @@ After (v1.5):   MQTT → Channels → Services → Channels → MQTT
 
 #### 2.1 Project Structure
 - [ ] Create `ml_service/` directory structure
-- [ ] Set up Python virtual environment
-- [ ] Create `requirements.txt` with dependencies
+- [ ] Set up and manage Python virtual environment with `uv`
+- [ ] Create `pyproject.toml` with dependencies
 - [ ] Create `config.yaml` for configuration
 
 #### 2.2 MQTT Client

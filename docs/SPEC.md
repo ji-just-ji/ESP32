@@ -90,15 +90,18 @@ An intelligent IoT system for automated environmental control using ESP32 microc
 - Audio buffering and compression
 - MQTT client for bi-directional communication
 - Window motor control based on received commands
+- IR control for air-conditioning based on received commands
 - WiFi connection management
 
-**MQTT Topics (Published):**
+**MQTT Topics (Publish):**
 - `sensor/{device_id}/temperature` - Raw temperature value (float)
 - `sensor/{device_id}/humidity` - Raw humidity value (float)
 - `sensor/{device_id}/audio` - Base64-encoded WAV audio (JSON)
 
-**MQTT Topics (Subscribed):**
+**MQTT Topics (Subscribe):**
+- `anc/{device_id}/control` - ?? @Jimmy
 - `window/{device_id}/control` - Window position commands (0-100%)
+- `ir/{device_id}/control` - IR commands for air conditioner (float)
 
 **Reference:** See `esp32_firmware/` directory for implementation
 
@@ -171,6 +174,7 @@ An intelligent IoT system for automated environmental control using ESP32 microc
   - `window_actions` - ML-driven window positions
   - `device_registry` - Device tracking
   - `ml_predictions` - Model performance metrics
+More details in the project [clickhouse documentation](clickhouse.md)
 
 #### Mosquitto MQTT Broker
 - **Purpose**: Message bus for all components
@@ -192,6 +196,15 @@ An intelligent IoT system for automated environmental control using ESP32 microc
 ## Communication Protocols
 
 ### MQTT Topic Structure
+
+#### MQTT Topics:
+- `sensor/{device_id}/temperature` - Raw temperature value (float)
+- `sensor/{device_id}/humidity` - Raw humidity value (float)
+- `sensor/{device_id}/audio` - Base64-encoded WAV audio (JSON)
+- `ml/inference/request/{device_id}` - Request from Go backend to ML service
+- `anc/{device_id}/control` - ?? @Jimmy
+- `window/{device_id}/control` - Window position commands (0-100%)
+- `ir/{device_id}/control` - IR commands for air conditioner (float)
 
 #### Sensor Data (ESP32 → Backend)
 ```
