@@ -10,10 +10,10 @@ import (
 
 type Config struct {
 	// MQTT Configuration
-	MQTTBroker             string
-	MQTTClientID           string
-	MQTTUsername           string
-	MQTTPassword           string
+	MQTTBroker   string
+	MQTTClientID string
+	MQTTUsername string
+	MQTTPassword string
 
 	// Multi-topic MQTT configuration
 	MQTTTopicTemperature   string
@@ -23,17 +23,17 @@ type Config struct {
 	MQTTTopicWindowControl string
 
 	// Legacy topics (for backward compatibility)
-	MQTTTopicSensor        string
-	MQTTTopicAction        string
+	MQTTTopicSensor string
+	MQTTTopicAction string
 
 	// ClickHouse Configuration
-	ClickHouseAddr         string
-	ClickHouseDB           string
-	ClickHouseUser         string
-	ClickHousePass         string
+	ClickHouseAddr string
+	ClickHouseDB   string
+	ClickHouseUser string
+	ClickHousePass string
 
 	// ML Model Configuration
-	ModelPath              string
+	ModelPath string
 
 	// CQRS Inference Configuration
 	InferencePollingIntervalSeconds int     // How often to poll ClickHouse (seconds)
@@ -42,9 +42,9 @@ type Config struct {
 	InferenceZScoreThreshold        float64 // Z-score threshold for triggering inference
 
 	// Legacy Change Detection Thresholds (deprecated in CQRS model)
-	TemperatureThreshold   float64
-	HumidityThreshold      float64
-	AudioAlwaysTrigger     bool
+	TemperatureThreshold float64
+	HumidityThreshold    float64
+	AudioAlwaysTrigger   bool
 }
 
 func Load() *Config {
@@ -53,10 +53,10 @@ func Load() *Config {
 
 	return &Config{
 		// MQTT Configuration
-		MQTTBroker:             getEnv("MQTT_BROKER", "tcp://localhost:1883"),
-		MQTTClientID:           getEnv("MQTT_CLIENT_ID", "iot-backend"),
-		MQTTUsername:           getEnv("MQTT_USERNAME", ""),
-		MQTTPassword:           getEnv("MQTT_PASSWORD", ""),
+		MQTTBroker:   getEnv("MQTT_BROKER", "tcp://localhost:1883"),
+		MQTTClientID: getEnv("MQTT_CLIENT_ID", "iot-backend"),
+		MQTTUsername: getEnv("MQTT_USERNAME", ""),
+		MQTTPassword: getEnv("MQTT_PASSWORD", ""),
 
 		// Multi-topic MQTT configuration
 		MQTTTopicTemperature:   getEnv("MQTT_TOPIC_TEMPERATURE", "sensor/+/temperature"),
@@ -66,17 +66,17 @@ func Load() *Config {
 		MQTTTopicWindowControl: getEnv("MQTT_TOPIC_WINDOW_CONTROL", "window/+/control"),
 
 		// Legacy topics
-		MQTTTopicSensor:        getEnv("MQTT_TOPIC_SENSOR", "sensor/data"),
-		MQTTTopicAction:        getEnv("MQTT_TOPIC_ACTION", "window/action"),
+		MQTTTopicSensor: getEnv("MQTT_TOPIC_SENSOR", "sensor/data"),
+		MQTTTopicAction: getEnv("MQTT_TOPIC_ACTION", "window/action"),
 
 		// ClickHouse Configuration
-		ClickHouseAddr:         getEnv("CLICKHOUSE_ADDR", "localhost:9000"),
-		ClickHouseDB:           getEnv("CLICKHOUSE_DB", "iot"),
-		ClickHouseUser:         getEnv("CLICKHOUSE_USER", "default"),
-		ClickHousePass:         getEnv("CLICKHOUSE_PASS", ""),
+		ClickHouseAddr: getEnv("CLICKHOUSE_ADDR", "localhost:9000"),
+		ClickHouseDB:   getEnv("CLICKHOUSE_DB", "iot"),
+		ClickHouseUser: getEnv("CLICKHOUSE_USER", "default"),
+		ClickHousePass: getEnv("CLICKHOUSE_PASS", ""),
 
 		// ML Model Configuration
-		ModelPath:              getEnv("MODEL_PATH", "./model/regression_model.json"),
+		ModelPath: getEnv("MODEL_PATH", "./model/regression_model.json"),
 
 		// CQRS Inference Configuration
 		InferencePollingIntervalSeconds: getEnvInt("INFERENCE_POLLING_INTERVAL_SECONDS", 60),
@@ -85,9 +85,9 @@ func Load() *Config {
 		InferenceZScoreThreshold:        getEnvFloat("INFERENCE_Z_SCORE_THRESHOLD", 1.5),
 
 		// Legacy Change Detection Thresholds (deprecated in CQRS model)
-		TemperatureThreshold:   getEnvFloat("TEMPERATURE_THRESHOLD", 0.5),
-		HumidityThreshold:      getEnvFloat("HUMIDITY_THRESHOLD", 2.0),
-		AudioAlwaysTrigger:     getEnvBool("AUDIO_ALWAYS_TRIGGER", true),
+		TemperatureThreshold: getEnvFloat("TEMPERATURE_THRESHOLD", 0.5),
+		HumidityThreshold:    getEnvFloat("HUMIDITY_THRESHOLD", 2.0),
+		AudioAlwaysTrigger:   getEnvBool("AUDIO_ALWAYS_TRIGGER", true),
 	}
 }
 

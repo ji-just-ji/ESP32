@@ -18,9 +18,12 @@ COPY pyproject.toml .python-version ./
 # Install dependencies using uv
 RUN uv pip install --system -r pyproject.toml
 
+# Copy .env.config from project root
+COPY ../.env.config ./
+
 # Copy application code
 COPY src/ ./src/
-COPY config.yaml ./
+COPY scripts/ ./scripts/
 
 # Copy models directory (with .gitkeep or actual models)
 COPY models/ ./models/

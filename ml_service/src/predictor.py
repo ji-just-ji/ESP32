@@ -4,8 +4,7 @@ ML predictor for window control inference.
 Combines feature processing and model inference to predict window positions.
 """
 
-import torch
-import torch.nn as nn
+import xgboost as xgb
 import numpy as np
 import logging
 from typing import Dict, Tuple
@@ -32,7 +31,6 @@ class Predictor:
             min_confidence: Minimum confidence threshold to publish predictions
         """
         self.model = model_loader.get_model()
-        self.device = next(self.model.parameters()).device
         self.metadata = model_loader.get_metadata()
 
         # Initialize feature processor with percentiles
@@ -151,19 +149,21 @@ class Predictor:
                 - position: Predicted window position in [0, 1]
                 - confidence: Confidence score in [0, 1]
         """
-        # Convert to tensor
-        input_tensor = torch.from_numpy(
-            normalized_features).float().unsqueeze(0)
-        input_tensor = input_tensor.to(self.device)
+        # Create DMatrix for XGBoost
+        # Reshape to 2D array: (1, 3) for single prediction
+        features_2d = normalized_features.reshape(1, -1)
+        dmatrix = xgb.DMatrix(features_2d)
 
         # Run inference
-        with torch.no_grad():
-            output = self.model(input_tensor)
-            position = output.item()
+        output = self.model.predict(dmatrix)
+        position = float(output[0])
+
+        # Ensure position is in valid range [0, 1]
+        position = np.clip(position, 0.0, 1.0)
 
         # Calculate confidence
         # For now, use a simple heuristic based on distance from boundaries
-        # More sophisticated: ensemble variance, dropout-based uncertainty, etc.
+        # More sophisticated: ensemble variance, quantile regression, etc.
         confidence = self._calculate_confidence(position)
 
         return position, confidence
@@ -202,7 +202,7 @@ class Predictor:
         """
         return {
             'version': self.metadata.get('version', 'unknown'),
-            'device': str(self.device),
+            'model_type': 'XGBoost',
             'percentiles': self.metadata['percentiles'],
             'output_range': [self.output_min, self.output_max],
             'min_confidence': self.min_confidence

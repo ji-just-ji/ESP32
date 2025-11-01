@@ -11,47 +11,36 @@ import time
 from typing import Callable, Dict, Optional
 from threading import Event
 
+from .config import MQTTConfig
+
 logger = logging.getLogger(__name__)
 
 
 class MQTTClient:
     """MQTT client wrapper for ML service."""
 
-    def __init__(self, broker: str, port: int, client_id: str,
-                 qos: int = 1, keepalive: int = 60, reconnect_delay: int = 5):
+    def __init__(self, mqtt_config: MQTTConfig):
         """
         Initialize MQTT client.
 
         Args:
-            broker: MQTT broker hostname
-            port: MQTT broker port
-            client_id: Unique client ID
-            qos: Quality of Service level (0, 1, or 2)
-            keepalive: Keepalive interval in seconds
-            reconnect_delay: Delay between reconnection attempts
+            mqtt_config: MQTTConfig object with all MQTT settings
         """
-        self.broker = broker
-        self.port = port
-        self.client_id = client_id
-        self.qos = qos
-        self.keepalive = keepalive
-        self.reconnect_delay = reconnect_delay
+        self.config = mqtt_config
 
-        self.client = mqtt.Client(client_id=client_id)
+        self.client = mqtt.Client(client_id=mqtt_config.client_id)
         self.client.on_connect = self._on_connect
         self.client.on_disconnect = self._on_disconnect
         self.client.on_message = self._on_message
 
         self.inference_callback: Optional[Callable] = None
-        self.inference_topic: Optional[str] = None
-        self.window_control_topic_template: Optional[str] = None
 
         self.connected = Event()
         self.should_reconnect = True
 
         logger.info(
-            f"MQTT client initialized: broker={broker}:{port}, "
-            f"client_id={client_id}, qos={qos}"
+            f"MQTT client initialized: broker={mqtt_config.broker}, "
+            f"client_id={mqtt_config.client_id}, qos={mqtt_config.qos}"
         )
 
     def set_inference_callback(self, callback: Callable[[Dict], None]) -> None:
@@ -64,21 +53,25 @@ class MQTTClient:
         self.inference_callback = callback
         logger.info("Inference callback registered")
 
-    def connect(self, inference_topic: str, window_control_topic_template: str) -> None:
-        """
-        Connect to MQTT broker and subscribe to inference topic.
+    def connect(self) -> None:
+        """Connect to MQTT broker and subscribe to inference topic."""
+        logger.info(f"Connecting to MQTT broker at {self.config.broker}")
 
-        Args:
-            inference_topic: Topic pattern for inference requests (e.g., 'ml/inference/request/#')
-            window_control_topic_template: Template for window control (e.g., 'window/{device_id}/control')
-        """
-        self.inference_topic = inference_topic
-        self.window_control_topic_template = window_control_topic_template
+        # Parse broker URL (tcp://host:port)
+        broker_url = self.config.broker
+        if broker_url.startswith('tcp://'):
+            broker_url = broker_url[6:]  # Remove 'tcp://' prefix
 
-        logger.info(f"Connecting to MQTT broker at {self.broker}:{self.port}")
+        # Split host and port
+        if ':' in broker_url:
+            host, port_str = broker_url.split(':')
+            port = int(port_str)
+        else:
+            host = broker_url
+            port = 1883  # Default MQTT port
 
         try:
-            self.client.connect(self.broker, self.port, self.keepalive)
+            self.client.connect(host, port, self.config.keepalive)
             self.client.loop_start()
 
             # Wait for connection (with timeout)
@@ -99,9 +92,8 @@ class MQTTClient:
             self.connected.set()
 
             # Subscribe to inference request topic
-            if self.inference_topic:
-                logger.info(f"Subscribing to {self.inference_topic}")
-                client.subscribe(self.inference_topic, qos=self.qos)
+            logger.info(f"Subscribing to {self.config.inference_topic}")
+            client.subscribe(self.config.inference_topic, qos=self.config.qos)
         else:
             logger.error(f"Connection failed with code {rc}")
             self.connected.clear()
@@ -114,8 +106,8 @@ class MQTTClient:
             logger.warning(f"Unexpected disconnection (rc={rc})")
 
             if self.should_reconnect:
-                logger.info(f"Attempting to reconnect in {self.reconnect_delay}s...")
-                time.sleep(self.reconnect_delay)
+                logger.info(f"Attempting to reconnect in {self.config.reconnect_delay}s...")
+                time.sleep(self.config.reconnect_delay)
                 try:
                     client.reconnect()
                 except Exception as e:
@@ -139,7 +131,7 @@ class MQTTClient:
                 return
 
             # Handle inference requests
-            if self.inference_topic and mqtt.topic_matches_sub(self.inference_topic, topic):
+            if mqtt.topic_matches_sub(self.config.inference_topic, topic):
                 self._handle_inference_request(data)
             else:
                 logger.warning(f"Received message on unexpected topic: {topic}")
@@ -184,13 +176,13 @@ class MQTTClient:
         """
         try:
             # Build topic from template
-            topic = self.window_control_topic_template.replace('{device_id}', device_id)
+            topic = self.config.window_control_topic.replace('{device_id}', device_id)
 
             # Serialize to JSON
             payload = json.dumps(prediction)
 
             # Publish
-            result = self.client.publish(topic, payload, qos=self.qos)
+            result = self.client.publish(topic, payload, qos=self.config.qos)
 
             if result.rc == mqtt.MQTT_ERR_SUCCESS:
                 logger.info(
